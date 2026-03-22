@@ -1,0 +1,9 @@
+langchain
+langchain-community
+langchain-core
+langchain-openai
+langgraph
+langgraph-checkpoint-sqlite
+anthropic
+openai
+sqlite-utils

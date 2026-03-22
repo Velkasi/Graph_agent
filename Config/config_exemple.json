@@ -1,0 +1,7 @@
+{
+  "model": "mistralai/devstral-small-2507",
+  "base_url": "Your_Base_URL_Here",
+  "api_key": "Your_API_Key_Here",
+  "temperature": 0,
+  "description": "mistralai/devstral-small-2507 via serveur LM Studio sur le réseau local"
+}

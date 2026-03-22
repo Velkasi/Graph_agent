@@ -1,0 +1,20 @@
+# Environnements virtuels
+.venv/
+venv/
+env/
+
+# Configs avec credentials (garder seulement l'exemple)
+Config/config_*.json
+!Config/config_exemple.json
+
+# Base SQLite de persistence (données de session locales)
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
