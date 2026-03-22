@@ -1,3 +1,7 @@
+# Tests locaux (données hardcodées, pas de valeur à versionner)
+agent_test.py
+main_test.py
+
 # Environnements virtuels
 .venv/
 venv/
@@ -18,3 +22,11 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# tests
+output_test/
+output_test_*/
+output_test/*.json
+
+#Claude
+.claude/

@@ -50,6 +50,7 @@ PERSISTENCE (SQLite) :
     thread_id = identifiant de session → reprise possible après crash.
 """
 
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +58,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from Graph.state import WorkflowState
+from Utils.logger import log, log_router, log_state, log_separator
 
 # Dossier de persistence SQLite
 PERSISTENCE_DIR = Path(__file__).parent.parent / "runs"
@@ -103,22 +105,27 @@ def planner_node(state: WorkflowState) -> dict:
     Écrit  : spec
     Modèle : mistral:7b-q4
     """
-    print(f"\n[{_now()}] ── PlannerAgent")
+    log_separator("PLANNER")
+    log("planner", "START", "Démarrage — prompt reçu")
     try:
         from Agents.Agent_Planner.agent import AgentPlanner
         agent = AgentPlanner()
+        # Utilise le discovery complet si disponible, sinon le prompt court
+        prompt = state.get("discovery_context") or state["user_prompt"]
         spec = agent.run(
-            prompt=state["user_prompt"],
+            prompt=prompt,
             ux_images=state.get("ux_images", []),
         )
+        n = len(spec.get("screens", []))
+        log("planner", "OK", f"Spec générée : '{spec.get('app_name', '?')}' — {n} écrans")
         return {
             "spec": spec,
             "current_agent": "planner",
             "completed_agents": ["planner"],
-            "team_log": [_log_entry("planner", "spec_generated", f"{len(spec.get('screens', []))} écrans")],
+            "team_log": [_log_entry("planner", "spec_generated", f"{n} écrans")],
         }
     except ImportError:
-        print("  [STUB] PlannerAgent non implémenté — données simulées")
+        log("planner", "WARN", "Non implémenté — données simulées (STUB)")
         stub_spec = {
             "status": "stub",
             "description": state.get("user_prompt", ""),
@@ -142,31 +149,82 @@ def architect_node(state: WorkflowState) -> dict:
     Modèle : mistral/devstral
     """
     retry = _get_retry(state, "architect")
-    print(f"\n[{_now()}] ── ArchitectAgent {'(retry #' + str(retry) + ')' if retry else ''}")
+    log_separator("ARCHITECT")
+    log("architect", "START", f"Démarrage {'— retry #' + str(retry) if retry else ''}")
 
-    # Si c'est un retry, l'agent lit le feedback de la review
     feedback_context = ""
     if retry > 0 and state.get("review_feedback"):
         issues = state["review_feedback"].get("issues", [])
-        feedback_context = f"\nCorrections demandées par le ReviewAgent :\n" + "\n".join(f"- {i}" for i in issues)
-        print(f"  → Feedback appliqué : {len(issues)} problème(s) à corriger")
+        feedback_context = "\nCorrections demandées par le ReviewAgent :\n" + "\n".join(f"- {i}" for i in issues)
+        log("architect", "INFO", f"Feedback appliqué : {len(issues)} problème(s) à corriger")
+        for i in issues:
+            log("architect", "INFO", f"  · {i}")
 
     try:
         from Agents.Agent_Architect.agent import AgentArchitect
         agent = AgentArchitect()
-        result = agent.run(
-            spec=str(state.get("spec", {})),
-            template_path=state.get("template_path", "."),
-            feedback=feedback_context,
+
+        # Résoudre le chemin absolu pour que create_project_file sache où écrire
+        project_path = str(Path(state.get("project_path", ".")).resolve())
+        spec = state.get("spec", {})
+        screens = [s.get("name", "?") for s in spec.get("screens", [])]
+
+        # Tour 1 : récapitulatif architecture
+        discovery = state.get("discovery_context", "")
+        message = (
+            f"Voici la spec du projet à architecturer :\n\n{spec}\n\n"
+            f"Template : {state.get('template_path', '.')}"
         )
+        if discovery:
+            message += f"\n\nCONTEXTE DISCOVERY (contraintes réelles du projet) :\n{discovery}"
+        if feedback_context:
+            message += f"\n\n{feedback_context}"
+        recap, messages = agent.chat([], message)
+
+        # Tour 2 : confirmation + création des fichiers via les tools de l'agent
+        confirm = (
+            f"Oui, c'est correct.\n\n"
+            f"Utilise maintenant create_project_file pour créer TOUS les fichiers vides "
+            f"de l'infrastructure dans ce dossier (chemin absolu) : {project_path}\n\n"
+            f"Fichiers attendus (au minimum) :\n"
+            f"- Un fichier par écran de la spec dans {project_path}/app/ : {screens}\n"
+            f"- Les composants partagés dans {project_path}/components/\n"
+            f"- Les hooks dans {project_path}/hooks/\n"
+            f"- Les types dans {project_path}/types/\n"
+            f"- Les services Supabase dans {project_path}/lib/\n\n"
+            f"Exemple de chemin : {project_path}/app/index.tsx\n"
+            f"content=\"\" pour tous les fichiers TypeScript. Un appel create_project_file par fichier."
+        )
+        result, _ = agent.chat(messages, confirm)
+
+        # Construire une architecture structurée en scannant les fichiers créés
+        project_dir = Path(project_path)
+        extensions = {".tsx", ".ts", ".sql", ".json", ".md", ".js"}
+        ignored = {"node_modules", ".git", ".expo", "dist", "build", "__pycache__"}
+        files_created = sorted(
+            str(p.relative_to(project_dir)).replace("\\", "/")
+            for p in project_dir.rglob("*")
+            if p.is_file()
+            and p.suffix in extensions
+            and not any(part in ignored for part in p.parts)
+        )
+        architecture = {
+            "status": "generated",
+            "project_path": project_path,
+            "screens": screens,
+            "files": files_created,
+        }
+
+        log("architect", "OK", f"Architecture générée — {len(files_created)} fichiers dans {project_path}")
         return {
-            "architecture": {"raw": result},
+            "architecture": architecture,
             "current_agent": "architect",
             "completed_agents": ["architect"],
             "retry_counts": _increment_retry(state, "architect") if retry else state.get("retry_counts", {}),
-            "team_log": [_log_entry("architect", "architecture_generated", f"retry={retry}")],
+            "team_log": [_log_entry("architect", "architecture_generated", f"retry={retry}, {len(files_created)} fichiers")],
         }
     except Exception as e:
+        log("architect", "ERROR", str(e))
         return {
             "architecture": {"status": "error", "error": str(e)},
             "current_agent": "architect",
@@ -184,25 +242,27 @@ def code_planner_node(state: WorkflowState) -> dict:
     Écrit  : code_plan
     Modèle : deepseek-coder:7b-q4
     """
-    print(f"\n[{_now()}] ── CodePlannerAgent")
+    log_separator("CODE PLANNER")
+    log("code_planner", "START", "Démarrage")
     try:
         from Agents.Agent_CodePlanner.agent import AgentCodePlanner
         agent = AgentCodePlanner()
         code_plan = agent.run(
             architecture=state.get("architecture", {}),
-            template_path=state.get("template_path", "."),
+            spec=state.get("spec", {}),
+            discovery_context=state.get("discovery_context", ""),
         )
+        n = len(code_plan.get("files", []))
+        log("code_planner", "OK", f"Plan généré : {n} fichiers")
         return {
             "code_plan": code_plan,
-            "current_agent": "code_planner",
             "completed_agents": ["code_planner"],
-            "team_log": [_log_entry("code_planner", "plan_generated", f"{len(code_plan.get('files', []))} fichiers")],
+            "team_log": [_log_entry("code_planner", "plan_generated", f"{n} fichiers")],
         }
     except ImportError:
-        print("  [STUB] CodePlannerAgent non implémenté — données simulées")
+        log("code_planner", "WARN", "Non implémenté — données simulées (STUB)")
         return {
             "code_plan": {"status": "stub", "files": []},
-            "current_agent": "code_planner",
             "completed_agents": ["code_planner"],
             "team_log": [_log_entry("code_planner", "stub")],
         }
@@ -216,22 +276,31 @@ def backend_node(state: WorkflowState) -> dict:
     Écrit  : fichiers SQL sur le disque
     Modèle : mistral:7b-q4
     """
-    print(f"\n[{_now()}] ── BackendAgent")
+    log_separator("BACKEND")
+    log("backend", "START", "Démarrage — génération des migrations SQL")
     try:
         from Agents.Agent_Backend.agent import AgentBackend
+        from pathlib import Path as _Path
         agent = AgentBackend()
-        agent.run(architecture=state.get("architecture", {}))
+        project_path = str(_Path(state.get("project_path", ".")).resolve())
+        result = agent.run(
+            spec=state.get("spec", {}),
+            architecture=state.get("architecture", {}),
+            project_path=project_path,
+            discovery_context=state.get("discovery_context", ""),
+        )
+        n = len(result.get("files_created", []))
+        log("backend", "OK", f"{n} fichier(s) Supabase créé(s)")
         return {
-            "current_agent": "backend",
             "completed_agents": ["backend"],
-            "team_log": [_log_entry("backend", "migrations_generated")],
+            "team_log": [_log_entry("backend", "supabase_generated", f"{n} fichiers")],
         }
-    except ImportError:
-        print("  [STUB] BackendAgent non implémenté")
+    except Exception as e:
+        log("backend", "ERROR", str(e))
         return {
-            "current_agent": "backend",
             "completed_agents": ["backend"],
-            "team_log": [_log_entry("backend", "stub")],
+            "errors": [f"BackendAgent: {e}"],
+            "team_log": [_log_entry("backend", "error", str(e))],
         }
 
 
@@ -246,28 +315,30 @@ def codegen_node(state: WorkflowState) -> dict:
     BOUCLE : peut être relancé par le ReviewAgent ou le TestAgent.
     """
     retry = _get_retry(state, "codegen")
-    print(f"\n[{_now()}] ── CodegenAgent {'(retry #' + str(retry) + ')' if retry else ''}")
+    log_separator("CODEGEN")
+    log("codegen", "START", f"Démarrage {'— retry #' + str(retry) if retry else ''}")
 
-    # Si c'est un retry, injecter le feedback dans le contexte de génération
     feedback_context = ""
     if retry > 0 and state.get("review_feedback"):
         issues = state["review_feedback"].get("issues", [])
         suggestions = state["review_feedback"].get("suggestions", [])
         feedback_context = (
-            f"\nProblèmes identifiés par le ReviewAgent :\n"
+            "\nProblèmes identifiés par le ReviewAgent :\n"
             + "\n".join(f"- {i}" for i in issues)
-            + (f"\nSuggestions :\n" + "\n".join(f"- {s}" for s in suggestions) if suggestions else "")
+            + ("\nSuggestions :\n" + "\n".join(f"- {s}" for s in suggestions) if suggestions else "")
         )
-        print(f"  → Feedback appliqué : {len(issues)} problème(s) à corriger")
+        log("codegen", "INFO", f"Feedback appliqué : {len(issues)} problème(s), {len(suggestions)} suggestion(s)")
 
     try:
-        from Agents.Agent_Codegen.agent import AgentCodegen
+        from Agents.Agent_CodeGen.agent import AgentCodegen
         agent = AgentCodegen()
         agent.run(
             code_plan=state.get("code_plan", {}),
             project_path=state.get("project_path", "."),
             feedback=feedback_context,
+            discovery_context=state.get("discovery_context", ""),
         )
+        log("codegen", "OK", "Fichiers générés")
         return {
             "current_agent": "codegen",
             "completed_agents": ["codegen"],
@@ -275,7 +346,7 @@ def codegen_node(state: WorkflowState) -> dict:
             "team_log": [_log_entry("codegen", "files_generated", f"retry={retry}")],
         }
     except ImportError:
-        print("  [STUB] CodegenAgent non implémenté")
+        log("codegen", "WARN", "Non implémenté (STUB)")
         return {
             "current_agent": "codegen",
             "completed_agents": ["codegen"],
@@ -295,7 +366,8 @@ def review_node(state: WorkflowState) -> dict:
     C'EST LE CHEF D'ÉQUIPE : il décide si le travail est acceptable ou non.
     Son feedback est lu par codegen/architect pour se corriger.
     """
-    print(f"\n[{_now()}] ── ReviewAgent")
+    log_separator("REVIEW")
+    log("review", "START", "Analyse du projet généré...")
     try:
         from Agents.Agent_Review.agent import AgentReview
         agent = AgentReview()
@@ -305,19 +377,24 @@ def review_node(state: WorkflowState) -> dict:
             architecture=state.get("architecture", {}),
             team_log=state.get("team_log", []),
         )
-        # verdict attendu : {"status": "approved"|"needs_rework", "feedback": {...}}
         status = verdict.get("status", "approved")
         feedback = verdict.get("feedback", {})
-        print(f"  → Verdict : {status.upper()}")
+        issues = feedback.get("issues", [])
+        level = "OK" if status == "approved" else "WARN"
+        log("review", level, f"Verdict : {status.upper()} — {len(issues)} problème(s)")
+        for issue in issues:
+            log("review", "WARN", f"  · {issue}")
+        log_state(state)
         return {
             "review_status": status,
             "review_feedback": feedback,
             "current_agent": "review",
             "completed_agents": ["review"],
-            "team_log": [_log_entry("review", status, str(feedback.get("issues", [])))],
+            "team_log": [_log_entry("review", status, str(issues))],
         }
     except ImportError:
-        print("  [STUB] ReviewAgent non implémenté — approuvé automatiquement")
+        log("review", "WARN", "Non implémenté — approuvé automatiquement (STUB)")
+        log_state(state)
         return {
             "review_status": "approved",
             "review_feedback": {},
@@ -337,23 +414,27 @@ def test_node(state: WorkflowState) -> dict:
 
     BOUCLE : si des tests échouent, le graph retourne à codegen.
     """
-    print(f"\n[{_now()}] ── TestAgent")
+    log_separator("TEST")
+    log("test", "START", "Lancement des tests...")
     try:
         from Agents.Agent_Test.agent import AgentTest
         agent = AgentTest()
         results = agent.run(project_path=state.get("project_path", "."))
-        print(f"  → Tests : {results.get('passed', 0)} OK / {results.get('failed', 0)} KO")
+        passed = results.get("passed", 0)
+        failed = results.get("failed", 0)
+        level = "OK" if failed == 0 else "WARN"
+        log("test", level, f"{passed} tests OK / {failed} KO")
+        for issue in results.get("issues", []):
+            log("test", "WARN", f"  · {issue}")
         return {
             "test_results": results,
-            "current_agent": "test",
             "completed_agents": ["test"],
-            "team_log": [_log_entry("test", "tested", f"passed={results.get('passed',0)} failed={results.get('failed',0)}")],
+            "team_log": [_log_entry("test", "tested", f"passed={passed} failed={failed}")],
         }
     except ImportError:
-        print("  [STUB] TestAgent non implémenté — tous tests passés")
+        log("test", "WARN", "Non implémenté — tous tests supposés passés (STUB)")
         return {
             "test_results": {"status": "stub", "passed": 0, "failed": 0, "issues": []},
-            "current_agent": "test",
             "completed_agents": ["test"],
             "team_log": [_log_entry("test", "stub_passed")],
         }
@@ -367,20 +448,20 @@ def cicd_node(state: WorkflowState) -> dict:
     Écrit  : fichier CI/CD sur le disque
     Modèle : phi3:3.8b-q5
     """
-    print(f"\n[{_now()}] ── CICDAgent")
+    log_separator("CICD")
+    log("cicd", "START", "Génération du pipeline CI/CD...")
     try:
         from Agents.Agent_CICD.agent import AgentCICD
         agent = AgentCICD()
         agent.run(project_path=state.get("project_path", "."))
+        log("cicd", "OK", ".github/workflows/ci.yml généré")
         return {
-            "current_agent": "cicd",
             "completed_agents": ["cicd"],
             "team_log": [_log_entry("cicd", "ci_generated")],
         }
     except ImportError:
-        print("  [STUB] CICDAgent non implémenté")
+        log("cicd", "WARN", "Non implémenté (STUB)")
         return {
-            "current_agent": "cicd",
             "completed_agents": ["cicd"],
             "team_log": [_log_entry("cicd", "stub")],
         }
@@ -407,16 +488,15 @@ def route_after_review(state: WorkflowState) -> list[str] | str:
     target_agent = feedback.get("target_agent", "codegen") or "codegen"
 
     if status == "approved":
-        print(f"  [ROUTER] review → APPROUVÉ → test ‖ cicd (parallèle)")
+        log_router("review", "test ‖ cicd", "approved — parallèle")
         return ["test", "cicd"]
 
-    # needs_rework : vérifier le nombre de retries
     retry = _get_retry(state, target_agent)
     if retry >= MAX_RETRIES:
-        print(f"  [ROUTER] review → MAX RETRIES ({MAX_RETRIES}) atteint → test ‖ cicd (best effort)")
+        log_router("review", "test ‖ cicd", f"max retries ({MAX_RETRIES}) atteint — best effort")
         return ["test", "cicd"]
 
-    print(f"  [ROUTER] review → CORRECTIONS → {target_agent} (tentative {retry + 1}/{MAX_RETRIES})")
+    log_router("review", target_agent, f"needs_rework — tentative {retry + 1}/{MAX_RETRIES}")
 
     if target_agent == "architect":
         return "architect"
@@ -440,10 +520,10 @@ def route_after_tests(state: WorkflowState) -> str:
 
     retry = _get_retry(state, "codegen")
     if retry >= MAX_RETRIES:
-        print(f"  [ROUTER] test → {failed} test(s) KO mais max retries atteint → END")
+        log_router("test", "END", f"{failed} test(s) KO — max retries atteint")
         return END
 
-    print(f"  [ROUTER] test → {failed} test(s) KO → codegen (tentative {retry + 1}/{MAX_RETRIES})")
+    log_router("test", "codegen", f"{failed} test(s) KO — tentative {retry + 1}/{MAX_RETRIES}")
     return "codegen"
 
 
@@ -524,5 +604,5 @@ def build_graph():
     checkpointer = SqliteSaver(conn)
 
     graph = builder.compile(checkpointer=checkpointer)
-    print(f"[GRAPH] Pipeline compilé — persistence : {DB_PATH}")
+    log("graph", "OK", f"Pipeline compilé — persistence : {DB_PATH}")
     return graph

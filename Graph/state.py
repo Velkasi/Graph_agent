@@ -68,6 +68,10 @@ class WorkflowState(TypedDict):
     template_path: str          # Ex: "C:/projets/expo-template"
     project_path: str           # Ex: "C:/projets/mon-app-generee"
 
+    # Contexte discovery complet (19 Q&A formatées depuis main.py / cli.py)
+    # Injecté dans chaque agent pour ancrer les décisions sur les vraies contraintes
+    discovery_context: str      # Ex: "Q1 — Nom : TaskFlow\nQ2 — Domaine : RH\n..."
+
     # --- SORTIES DES AGENTS ---
     spec: dict                  # PlannerAgent   → {"screens": [...], "features": [...]}
     architecture: dict          # ArchitectAgent → {"screens": [...], "database": {...}}

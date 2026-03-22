@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(.venv/Scripts/pip install:*)",
-      "Bash(.venv/Scripts/python -c \"import langchain; print\\(langchain.__version__\\)\")"
+      "Bash(.venv/Scripts/python -c \"import langchain; print\\(langchain.__version__\\)\")",
+      "Bash(.venv/Scripts/pip show:*)",
+      "Bash(python -c \":*)"
     ]
   }
 }

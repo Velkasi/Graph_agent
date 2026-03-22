@@ -62,7 +62,7 @@ class AgentArchitect(BaseAgent):
     """
 
     def __init__(self):
-        super().__init__("config_mistral")
+        super().__init__("config_groq", agent_name="architect")
 
         self.tools = [
             scan_template_tree,
@@ -77,6 +77,24 @@ class AgentArchitect(BaseAgent):
         )
 
         print(f"[AgentArchitect] Prêt avec {len(self.tools)} tools.")
+
+    def run(self, spec: str, template_path: str, feedback: str = "") -> str:
+        """
+        Point d'entrée pour le graph (architect_node).
+
+        Args:
+            spec          : spec produit sérialisée (JSON string)
+            template_path : chemin vers le template Expo
+            feedback      : corrections demandées par le ReviewAgent (si retry)
+
+        Returns:
+            str — architecture générée (texte libre ou JSON)
+        """
+        message = f"Voici la spec du projet à architecturer :\n\n{spec}\n\nTemplate : {template_path}"
+        if feedback:
+            message += f"\n\n{feedback}"
+        response, _ = self.chat([], message)
+        return response
 
     def chat(self, messages: list, user_message: str) -> tuple[str, list]:
         """

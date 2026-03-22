@@ -4,7 +4,7 @@ agent.py — ReviewAgent
 Chef de qualité du pipeline. Analyse le projet généré par CodegenAgent,
 corrige les petits problèmes directement, et émet un verdict structuré.
 
-Modèle : deepseek-coder:7b-q4  (config_deepseek)
+Modèle : openai/gpt-oss-120b  (config_groq)
 
 Rôle dans la boucle d'auto-correction LangGraph :
     codegen → [review] → "approved"     → test + cicd
@@ -214,7 +214,7 @@ class AgentReview(BaseAgent):
     """
 
     def __init__(self):
-        super().__init__("config_deepseek")
+        super().__init__("config_groq", agent_name="review")
 
         self.tools = [
             list_project_files,

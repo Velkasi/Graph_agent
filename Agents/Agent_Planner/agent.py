@@ -4,10 +4,8 @@ agent.py — PlannerAgent
 Premier agent du pipeline. Transforme un prompt utilisateur + maquettes UX
 en spécification produit structurée (spec riche).
 
-Modèle : qwen/qwen3.5-9b  (config_qwen)
+Modèle : openai/gpt-oss-120b  (config_groq)
   - Vision   : les maquettes UX sont passées inline dans le message multimodal
-  - Thinking : le modèle raisonne dans des balises <think>...</think> avant de
-               produire le JSON → ces balises sont strippées avant le parsing
 
 Pas de tools ni de boucle ReAct :
   - La vision est native (images dans le message)
@@ -24,6 +22,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from Agents.base_agent import BaseAgent
+from Utils.logger import log, log_error
 
 
 # ===========================================================================
@@ -37,7 +36,28 @@ Analyser le prompt utilisateur (et les maquettes UX si présentes) pour produire
 
 Cette spec est la FONDATION de tout le projet. Elle sera lue par l'ArchitectAgent pour concevoir l'architecture technique, puis par tous les agents en aval. Sois exhaustif.
 
-RÈGLES :
+MÉTHODE BMAD (suis ces 4 phases dans ta réflexion interne avant d'écrire le JSON) :
+
+B — BRIEF
+• Quelle est la proposition de valeur centrale en une phrase ?
+• En quoi cette app est-elle différente d'une app CRUD générique ?
+
+M — MARCHÉ & UTILISATEURS
+• Qui sont les utilisateurs primaires ? (rôle, contexte, fréquence d'usage)
+• Quels sont leurs 3 principaux jobs-to-be-done ?
+• Quels pain points l'app résout-elle concrètement ?
+
+A — ARCHITECTURE (contraintes non-négociables)
+• Quelles décisions techniques sont imposées ? (stack, offline, realtime, auth)
+• Quelles sont les relations clés entre les entités de données ?
+• Y a-t-il des contraintes de conformité (RGPD, HIPAA) ou de scalabilité ?
+
+D — DÉVELOPPEMENT — périmètre V1
+• Quels sont les écrans MINIMAUX pour que l'app soit utile ?
+• Qu'est-ce qui est explicitement HORS scope V1 ?
+• Quel est le modèle de données minimal (entités + champs clés) ?
+
+RÈGLES DE SPEC :
 - Chaque écran doit avoir un nom clair, une description et ses actions clés
 - Les data_entities sont les futures tables Supabase (entités métier uniquement, pas les tables système)
 - Déduis intelligemment ce qui n'est pas dit (ex: si auth=true → ajouter écran "Connexion" et entité "users")
@@ -65,7 +85,8 @@ Respecte exactement cette structure :
   "data_entities": ["string — ex: task, project, comment"],
   "tech_constraints": "string — ex: offline-first, realtime, multi-tenant",
   "monetization": "string — ex: freemium, abonnement, gratuit",
-  "priority": "v1"
+  "priority": "v1",
+  "out_of_scope_v1": ["string — features explicitement exclues de V1"]
 }"""
 
 
@@ -145,9 +166,8 @@ class AgentPlanner(BaseAgent):
     """
     PlannerAgent — traduit un prompt utilisateur + maquettes en spec produit.
 
-    Utilise qwen3.5-9b (vision + thinking) :
+    Utilise openai/gpt-oss-120b via Groq :
       - Passe les images directement dans le message multimodal
-      - Le mode thinking génère un raisonnement interne avant le JSON final
 
     Usage depuis graph.py (planner_node) :
         agent = AgentPlanner()
@@ -159,8 +179,8 @@ class AgentPlanner(BaseAgent):
     """
 
     def __init__(self):
-        super().__init__("config_qwen")
-        print("[PlannerAgent] Prêt — qwen3.5-9b (vision + thinking).")
+        super().__init__("config_groq", agent_name="planner")
+        log("planner", "INFO", "Prêt — openai/gpt-oss-120b (Groq)")
 
     def run(self, prompt: str, ux_images: list[str] | None = None) -> dict:
         """
@@ -199,7 +219,7 @@ class AgentPlanner(BaseAgent):
                 images_loaded += 1
 
         if ux_images:
-            print(f"  [PlannerAgent] {images_loaded}/{len(ux_images)} image(s) chargée(s)")
+            log("planner", "INFO", f"{images_loaded}/{len(ux_images)} image(s) chargée(s)")
 
         # --- Appel LLM ---
         messages = [
@@ -207,15 +227,18 @@ class AgentPlanner(BaseAgent):
             HumanMessage(content=content),
         ]
 
-        print("  [PlannerAgent] Génération de la spec en cours...")
+        log("planner", "INFO", "Appel LLM en cours...")
         response = self.llm.invoke(messages)
+        log("planner", "INFO", f"Réponse reçue — {len(response.content)} caractères")
 
         # --- Parse du JSON (avec gestion du thinking) ---
         spec = _parse_spec_json(response.content)
 
         if "app_name" in spec:
-            n_screens = len(spec.get("screens", []))
+            n_screens  = len(spec.get("screens", []))
             n_features = len(spec.get("features", []))
-            print(f"  [PlannerAgent] ✓ Spec générée : '{spec['app_name']}' — {n_screens} écrans, {n_features} features")
+            log("planner", "OK", f"'{spec['app_name']}' — {n_screens} écrans, {n_features} features")
+        else:
+            log_error("planner", "Spec incomplète ou parse_error — voir champ 'raw'")
 
         return spec

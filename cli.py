@@ -108,38 +108,56 @@ def lister_sessions():
 
 
 def demander_inputs_pipeline() -> dict:
-    """Demande à l'utilisateur les informations pour lancer le pipeline."""
-    print("\n--- Configuration du pipeline ---\n")
+    """
+    Lance le discovery complet (19 questions) puis collecte les paramètres
+    du pipeline. Le contexte discovery est injecté dans chaque agent du workflow.
+    """
+    from main import poser_questions, build_context
 
-    user_prompt = input(
-        "Decrivez l'application a construire\n"
-        "(ex: app de gestion de taches avec auth, profils et notifications)\n> "
-    ).strip()
+    print("\n" + "=" * 60)
+    print("  DISCOVERY — Définissons votre SaaS ensemble")
+    print("  Ces réponses guideront CHAQUE agent du pipeline.")
+    print("=" * 60)
+
+    # Discovery complet — 19 questions structurées
+    answers = poser_questions()
+    discovery_context = build_context(answers)
+
+    # Récupérer les valeurs clés directement depuis les réponses
+    project_path_raw = answers.get("Q5", "").strip()
+    project_path = project_path_raw if project_path_raw else "./output"
+
+    print("\n--- Paramètres complémentaires ---\n")
 
     template_path = input(
-        "\nChemin vers le template Expo (laisser vide = dossier courant)\n> "
+        "Chemin vers le template Expo (laisser vide = dossier courant)\n> "
     ).strip() or "."
-
-    project_path = input(
-        "\nChemin de destination du projet genere (laisser vide = ./output)\n> "
-    ).strip() or "./output"
 
     ux_images_raw = input(
         "\nChemins vers les maquettes UX (separes par des virgules, optionnel)\n> "
     ).strip()
     ux_images = [p.strip() for p in ux_images_raw.split(",") if p.strip()]
 
+    # user_prompt = résumé court depuis Q1 + Q2 (pour les logs)
+    user_prompt = f"{answers.get('Q1', 'App')} — {answers.get('Q2', '')}"
+
     return {
-        "user_prompt": user_prompt,
-        "template_path": template_path,
-        "project_path": project_path,
-        "ux_images": ux_images,
-        "completed_agents": [],
-        "errors": [],
-        "current_agent": "",
-        "spec": {},
-        "architecture": {},
-        "code_plan": {},
+        "user_prompt":       user_prompt,
+        "discovery_context": discovery_context,
+        "template_path":     template_path,
+        "project_path":      project_path,
+        "ux_images":         ux_images,
+        "completed_agents":  [],
+        "errors":            [],
+        "team_log":          [],
+        "current_agent":     "",
+        "spec":              {},
+        "architecture":      {},
+        "code_plan":         {},
+        "test_results":      {},
+        "review_status":     "pending",
+        "review_feedback":   {},
+        "retry_counts":      {},
     }
 
 
@@ -225,9 +243,24 @@ def tester_agent_seul():
         except Exception as e:
             print(f"  Erreur : {e}")
 
-    elif agent_key in ("code_planner", "codegen", "backend", "review", "test", "cicd"):
+    elif agent_key == "code_planner":
+        print("  Lancement via agent_test.py :")
+        print("  python Agents/Agent_CodePlanner/agent_test.py")
+
+    elif agent_key == "codegen":
+        print("  Lancement via agent_test.py :")
+        print("  python Agents/Agent_CodeGen/agent_test.py")
+
+    elif agent_key == "backend":
+        print("  Lancement via agent_test.py :")
+        print("  python Agents/Agent_Backend/agent_test.py")
+
+    elif agent_key == "review":
+        print("  Lancement via agent_test.py :")
+        print("  python Agents/Agent_Review/agent_test.py")
+
+    elif agent_key in ("test", "cicd"):
         print(f"  [STUB] {agent_key} pas encore implemente.")
-        print("  Implementez l'agent puis relancez.")
 
     else:
         print("  Agent non reconnu.")
